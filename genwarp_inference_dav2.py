@@ -1,16 +1,22 @@
 # Load models.
+
+import sys
+
+sys.path.append('./extern/Depth-Anything-V2/metric_depth')
+
 import torch
-import numpy as np
-import torch.nn.functional as F
 import torchvision
 
 torchvision.disable_beta_transforms_warning()
-
-from os.path import basename, splitext
-from PIL import Image
-from torchvision.transforms.functional import to_tensor, to_pil_image
-
 from genwarp import GenWarp
+from depth_anything_v2.dpt import DepthAnythingV2
+
+import numpy as np
+from PIL import Image
+
+import torch.nn.functional as F
+from torchvision.transforms.functional import to_pil_image
+
 from genwarp.ops import camera_lookat, get_projection_matrix, sph2cart, focal_length_to_fov
 from extern.ZoeDepth.zoedepth.utils.misc import colorize
 
@@ -27,28 +33,43 @@ def crop(img: Image) -> Image:
     return img.crop((left, top, right, bottom))
 
 
-def main(zeo_depth_path, genwarp_checkpoints_path, image_file, focal_length_mm, res, azi_deg, ele_deg, radius, output_path):
-    # ZoeDepth
-    zoedepth = torch.hub.load(zeo_depth_path, 'ZoeD_N', source='local', pretrained=True, trust_repo=True).to('cuda')
+def main(dav2_outdoor, dav2_model, image_file, focal_length_mm, res, azi_deg, ele_deg, radius, output_path):
+    dav2_model_configs = {
+        'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]},
+        'vitb': {'encoder': 'vitb', 'features': 128, 'out_channels': [96, 192, 384, 768]},
+        'vitl': {'encoder': 'vitl', 'features': 256, 'out_channels': [256, 512, 1024, 1024]},
+    }
+
+    # Depth Anything V2
+    dav2_model_config = {
+        **dav2_model_configs[dav2_model],
+        # 20 for indoor model, 80 for outdoor model
+        'max_depth': 80 if dav2_outdoor else 20,
+    }
+    depth_anything = DepthAnythingV2(**dav2_model_config)
+
+    # Change the path to the
+    dav2_model_fn = f'depth_anything_v2_metric_{"vkitti" if dav2_outdoor else "hypersim"}_{dav2_model}.pth'
+    depth_anything.load_state_dict(torch.load(f'./checkpoints_dav2/{dav2_model_fn}', map_location='cpu'))
+    depth_anything = depth_anything.to('cuda').eval()
 
     # GenWarp
-    genwarp_cfg = dict(pretrained_model_path=genwarp_checkpoints_path, checkpoint_name='multi1', half_precision_weights=True)
+    genwarp_cfg = dict(pretrained_model_path='./checkpoints', checkpoint_name='multi1', half_precision_weights=True)
     genwarp_nvs = GenWarp(cfg=genwarp_cfg)
 
     # To radian.
     azi = torch.tensor(np.deg2rad(azi_deg))
     ele = torch.tensor(np.deg2rad(ele_deg))
 
-    # Load  an image.
-    src_image = to_tensor(crop(Image.open(image_file).convert('RGB')).resize((res, res)))[None].cuda()  # BCHW
-    name = splitext(basename(image_file))[0]
+    # Load an image.
+    src_image = np.asarray(crop(Image.open(image_file).convert('RGB')).resize((res, res)))
 
     # Estimate the depth.
-    src_depth = zoedepth.infer(src_image)  # BCHW
+    src_depth = depth_anything.infer_image(src_image[..., ::-1].copy())
 
     # Go half precision.
-    src_image = src_image.half()
-    src_depth = src_depth.half()
+    src_image = torch.from_numpy(src_image / 255.0).permute(2, 0, 1)[None].cuda().half()
+    src_depth = torch.from_numpy(src_depth)[None, None].cuda().half()
 
     # Projection matrix.
     ## Using values from ZoeDepth
@@ -105,10 +126,12 @@ def main(zeo_depth_path, genwarp_checkpoints_path, image_file, focal_length_mm, 
 
 
 if __name__ == "__main__":
-    zeo_depth_path = "extern/ZoeDepth"
-    genwarp_checkpoints_path = "checkpoints"
+    # Indoor or outdoor model selection for DepthAnythingV2
+    dav2_outdoor = False  # Set True for outdoor, False for indoor
+    dav2_model = 'vitl'  # ['vits', 'vitb', 'vitl']
+
     # Example image 1.
-    image_file = 'assets/pexels-heyho-5998120_19mm.jpg'
+    image_file = './assets/pexels-heyho-5998120_19mm.jpg'
     focal_length_mm = 19  # 35mm full frame equivalent focal length in mm
 
     # Example image 2.
@@ -129,4 +152,4 @@ if __name__ == "__main__":
 
     output_path = "output/2.png"
 
-    main(zeo_depth_path, genwarp_checkpoints_path, image_file, focal_length_mm, res, azi_deg, ele_deg, radius, output_path)
+    main(dav2_outdoor, dav2_model, image_file, focal_length_mm, res, azi_deg, ele_deg, radius, output_path)
