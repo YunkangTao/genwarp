@@ -9,59 +9,39 @@ import torch.nn.functional as F
 from einops import rearrange
 from splatting import splatting_function
 
-def sph2cart(
-    azi: Float[Tensor, 'B'],
-    ele: Float[Tensor, 'B'],
-    r: Float[Tensor, 'B']
-) -> Float[Tensor, 'B 3']:
+
+def sph2cart(azi: Float[Tensor, 'B'], ele: Float[Tensor, 'B'], r: Float[Tensor, 'B']) -> Float[Tensor, 'B 3']:
     # z-up, y-right, x-back
     rcos = r * torch.cos(ele)
-    pos_cart = torch.stack([
-        rcos * torch.cos(azi),
-        rcos * torch.sin(azi),
-        r * torch.sin(ele)
-    ], dim=1)
+    pos_cart = torch.stack([rcos * torch.cos(azi), rcos * torch.sin(azi), r * torch.sin(ele)], dim=1)
 
     return pos_cart
+
 
 def get_viewport_matrix(
     width: int,
     height: int,
-    batch_size: int=1,
-    device: torch.device=None,
+    batch_size: int = 1,
+    device: torch.device = None,
 ) -> Float[Tensor, 'B 4 4']:
-    N = torch.tensor(
-        [[width/2, 0, 0, width/2],
-        [0, height/2, 0, height/2],
-        [0, 0, 1/2, 1/2],
-        [0, 0, 0, 1]],
-        dtype=torch.float32,
-        device=device
-    )[None].repeat(batch_size, 1, 1)
+    N = torch.tensor([[width / 2, 0, 0, width / 2], [0, height / 2, 0, height / 2], [0, 0, 1 / 2, 1 / 2], [0, 0, 0, 1]], dtype=torch.float32, device=device)[None].repeat(
+        batch_size, 1, 1
+    )
     return N
 
-def get_projection_matrix(
-    fovy: Float[Tensor, 'B'],
-    aspect_wh: float,
-    near: float,
-    far: float
-) -> Float[Tensor, 'B 4 4']:
+
+def get_projection_matrix(fovy: Float[Tensor, 'B'], aspect_wh: float, near: float, far: float) -> Float[Tensor, 'B 4 4']:
     batch_size = fovy.shape[0]
     proj_mtx = torch.zeros(batch_size, 4, 4, dtype=torch.float32)
     proj_mtx[:, 0, 0] = 1.0 / (torch.tan(fovy / 2.0) * aspect_wh)
-    proj_mtx[:, 1, 1] = -1.0 / torch.tan(
-        fovy / 2.0
-    )  # add a negative sign here as the y axis is flipped in nvdiffrast output
+    proj_mtx[:, 1, 1] = -1.0 / torch.tan(fovy / 2.0)  # add a negative sign here as the y axis is flipped in nvdiffrast output
     proj_mtx[:, 2, 2] = -(far + near) / (far - near)
     proj_mtx[:, 2, 3] = -2.0 * far * near / (far - near)
     proj_mtx[:, 3, 2] = -1.0
     return proj_mtx
 
-def camera_lookat(
-    eye: Float[Tensor, 'B 3'],
-    target: Float[Tensor, 'B 3'],
-    up: Float[Tensor, 'B 3']
-) -> Float[Tensor, 'B 4 4']:
+
+def camera_lookat(eye: Float[Tensor, 'B 3'], target: Float[Tensor, 'B 3'], up: Float[Tensor, 'B 3']) -> Float[Tensor, 'B 4 4']:
     B = eye.shape[0]
     f = F.normalize(eye - target)
     l = F.normalize(torch.linalg.cross(up, f))
@@ -71,17 +51,16 @@ def camera_lookat(
     M_R = torch.eye(4, dtype=torch.float32)[None].repeat((B, 1, 1))
     M_R[..., :3, :3] = R
 
-    T = - eye
+    T = -eye
     M_T = torch.eye(4, dtype=torch.float32)[None].repeat((B, 1, 1))
     M_T[..., :3, 3] = T
 
     return (M_R @ M_T).to(dtype=torch.float32)
 
-def focal_length_to_fov(
-    focal_length: float,
-    censor_length: float = 24.
-) -> float:
-    return 2 * np.arctan(censor_length / focal_length / 2.)
+
+def focal_length_to_fov(focal_length: float, censor_length: float = 24.0) -> float:
+    return 2 * np.arctan(censor_length / focal_length / 2.0)
+
 
 def forward_warper(
     image: Float[Tensor, 'B C H W'],
@@ -89,7 +68,7 @@ def forward_warper(
     pcd: Float[Tensor, 'B (H W) 4'],
     mvp_mtx: Float[Tensor, 'B 4 4'],
     viewport_mtx: Float[Tensor, 'B 4 4'],
-    alpha: float = 0.5
+    alpha: float = 0.5,
 ) -> Dict[str, Tensor]:
     H, W = image.shape[2:4]
 
@@ -101,7 +80,7 @@ def forward_warper(
 
     # Masking invalid pixels.
     invalid = coords_new[..., 2] <= 0
-    coords_new[invalid] = -1000000 if coords_new.dtype == torch.float32 else -1e+4
+    coords_new[invalid] = -1000000 if coords_new.dtype == torch.float32 else -1e4
 
     # Calculate flow and importance for splatting.
     new_z = points_c[..., 2:3]
@@ -118,13 +97,9 @@ def forward_warper(
     # Splatting.
     warped = splatting_function('softmax', image, flow, importance, eps=1e-6)
     ## mask is 1 where there is no splat
-    mask = (warped == 0.).all(dim=1, keepdim=True).to(image.dtype)
+    mask = (warped == 0.0).all(dim=1, keepdim=True).to(image.dtype)
     flow2 = rearrange(coords_new[..., :2], 'b (h w) c -> b c h w', h=H, w=W)
 
-    output = dict(
-        warped=warped,
-        mask=mask,
-        correspondence=flow2
-    )
+    output = dict(warped=warped, mask=mask, correspondence=flow2)
 
     return output

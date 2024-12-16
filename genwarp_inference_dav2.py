@@ -33,6 +33,38 @@ def crop(img: Image) -> Image:
     return img.crop((left, top, right, bottom))
 
 
+def get_src_proj_mtx(focal_length_mm, src_image):
+    fovy = focal_length_to_fov(focal_length_mm, 24.0)
+    fovy = torch.ones(1) * fovy
+    near, far = 0.01, 100
+    src_proj_mtx = get_projection_matrix(fovy=fovy, aspect_wh=1.0, near=near, far=far).to(src_image)
+    return src_proj_mtx
+
+
+def get_rel_view_mtx(azi_deg, ele_deg, src_depth, radius, src_image):
+    # To radian.
+    azi = torch.tensor(np.deg2rad(azi_deg))
+    ele = torch.tensor(np.deg2rad(ele_deg))
+
+    z_up = torch.tensor([[0.0, 0.0, 1.0]])
+
+    ### world: z-up, y-right, x-back
+    src_view_mtx = camera_lookat(torch.tensor([[0.0, 0.0, 0.0]]), torch.tensor([[-1.0, 0.0, 0.0]]), z_up)  # From (0, 0, 0)  # Cast rays to -x  # z-up
+
+    ## Target camera.
+    mean_depth = src_depth.mean(dim=(2, 3)).squeeze(1).cpu()
+
+    ## View from
+    eye = sph2cart(azi, ele, mean_depth + radius).float()
+
+    ## View at
+    at = F.pad(-mean_depth[:, None], (0, 2), mode='constant', value=0)
+    tar_view_mtx = camera_lookat(eye + at, at, z_up)
+    rel_view_mtx = (tar_view_mtx @ torch.linalg.inv(src_view_mtx.float())).to(src_image)
+
+    return rel_view_mtx
+
+
 def main(dav2_outdoor, dav2_model, image_file, focal_length_mm, res, azi_deg, ele_deg, radius, output_path):
     dav2_model_configs = {
         'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]},
@@ -57,9 +89,9 @@ def main(dav2_outdoor, dav2_model, image_file, focal_length_mm, res, azi_deg, el
     genwarp_cfg = dict(pretrained_model_path='./checkpoints', checkpoint_name='multi1', half_precision_weights=True)
     genwarp_nvs = GenWarp(cfg=genwarp_cfg)
 
-    # To radian.
-    azi = torch.tensor(np.deg2rad(azi_deg))
-    ele = torch.tensor(np.deg2rad(ele_deg))
+    # # To radian.
+    # azi = torch.tensor(np.deg2rad(azi_deg))
+    # ele = torch.tensor(np.deg2rad(ele_deg))
 
     # Load an image.
     src_image = np.asarray(crop(Image.open(image_file).convert('RGB')).resize((res, res)))
@@ -72,35 +104,11 @@ def main(dav2_outdoor, dav2_model, image_file, focal_length_mm, res, azi_deg, el
     src_depth = torch.from_numpy(src_depth)[None, None].cuda().half()
 
     # Projection matrix.
-    ## Using values from ZoeDepth
-    try:
-        fovy = np.deg2rad(fovy_deg)
-    except Exception:
-        fovy = focal_length_to_fov(focal_length_mm, 24.0)
-    fovy = torch.ones(1) * fovy
-    near, far = 0.01, 100
-    src_proj_mtx = get_projection_matrix(fovy=fovy, aspect_wh=1.0, near=near, far=far).to(src_image)
+    src_proj_mtx = get_src_proj_mtx(focal_length_mm, src_image)
     ## Use the same projection matrix for the source and the target.
     tar_proj_mtx = src_proj_mtx
 
-    ## Reference camera for ZoeDepth.
-    z_up = torch.tensor([[0.0, 0.0, 1.0]])
-    ### world: z-up, y-right, x-back
-    src_view_mtx = camera_lookat(torch.tensor([[0.0, 0.0, 0.0]]), torch.tensor([[-1.0, 0.0, 0.0]]), z_up)  # From (0, 0, 0)  # Cast rays to -x  # z-up
-
-    ## Target camera.
-    mean_depth = src_depth.mean(dim=(2, 3)).squeeze(1).cpu()
-
-    # Camera path view matrices.
-    ## View from
-    eye = sph2cart(azi, ele, mean_depth + radius).float()
-    ## View at
-    at = F.pad(-mean_depth[:, None], (0, 2), mode='constant', value=0)
-    ## Calculate the view matrix.
-    tar_view_mtx = camera_lookat(eye + at, at, z_up)  # Move camera relative to the scene.  # Looking at the center of the scene.  # z-up
-
-    ## Relative camera pose from the target eye coords to reference eye coords.
-    rel_view_mtx = (tar_view_mtx @ torch.linalg.inv(src_view_mtx.float())).to(src_image)
+    rel_view_mtx = get_rel_view_mtx(azi_deg, ele_deg, src_depth, radius, src_image)
 
     # GenWarp.
     renders = genwarp_nvs(src_image=src_image, src_depth=src_depth, rel_view_mtx=rel_view_mtx, src_proj_mtx=src_proj_mtx, tar_proj_mtx=tar_proj_mtx)
