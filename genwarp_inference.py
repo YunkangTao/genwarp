@@ -2,11 +2,13 @@
 import torch
 import numpy as np
 import torch.nn.functional as F
+import torchvision
+
+torchvision.disable_beta_transforms_warning()
 
 from os.path import basename, splitext
 from PIL import Image
-from torchvision.transforms.functional import to_tensor
-from torchvision.transforms.functional import to_pil_image
+from torchvision.transforms.functional import to_tensor, to_pil_image
 
 from genwarp import GenWarp
 from genwarp.ops import camera_lookat, get_projection_matrix, sph2cart, focal_length_to_fov
