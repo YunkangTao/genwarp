@@ -1,13 +1,12 @@
 from typing import Dict
-from jaxtyping import Float
 
 import numpy as np
 import torch
-from torch import Tensor
 import torch.nn.functional as F
-
 from einops import rearrange
+from jaxtyping import Float
 from splatting import splatting_function
+from torch import Tensor
 
 
 def sph2cart(azi: Float[Tensor, 'B'], ele: Float[Tensor, 'B'], r: Float[Tensor, 'B']) -> Float[Tensor, 'B 3']:

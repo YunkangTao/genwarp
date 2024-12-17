@@ -9,18 +9,21 @@ import torch
 import torchvision
 
 torchvision.disable_beta_transforms_warning()
-from genwarp import GenWarp
-from depth_anything_v2.dpt import DepthAnythingV2
-
 import numpy as np
-from PIL import Image
-
 import torch.nn.functional as F
+from depth_anything_v2.dpt import DepthAnythingV2
+from PIL import Image
 from torchvision.transforms.functional import to_pil_image
-
-from genwarp.ops import camera_lookat, get_projection_matrix, sph2cart, focal_length_to_fov
-from extern.ZoeDepth.zoedepth.utils.misc import colorize
 from tqdm import tqdm
+
+from extern.ZoeDepth.zoedepth.utils.misc import colorize
+from genwarp import GenWarp
+from genwarp.ops import (
+    camera_lookat,
+    focal_length_to_fov,
+    get_projection_matrix,
+    sph2cart,
+)
 
 
 # Crop the image to the shorter side.
@@ -126,28 +129,6 @@ def prepare_camera_poses(camera_pose_file):
     return whole_camera_para
 
 
-def get_projection_matrix_from_intrinsics(fx, fy, cx, cy, near, far, height, width):
-    # 构建归一化的视锥
-    w = width
-    h = height
-    right = near * (w / 2 - cx) / fx
-    left = -right
-    top = near * (h / 2 - cy) / fy
-    bottom = -top
-
-    # 利用OpenGL投影矩阵公式构建投影矩阵
-    proj_mtx = torch.zeros((4, 4))
-    proj_mtx[0, 0] = 2 * near / (right - left)
-    proj_mtx[1, 1] = 2 * near / (top - bottom)
-    proj_mtx[0, 2] = (right + left) / (right - left)
-    proj_mtx[1, 2] = (top + bottom) / (top - bottom)
-    proj_mtx[2, 2] = -(far + near) / (far - near)
-    proj_mtx[2, 3] = -2 * far * near / (far - near)
-    proj_mtx[3, 2] = -1
-
-    return proj_mtx
-
-
 def get_src_proj_mtx(focal_length_x_norm, focal_length_y_norm, height, width, res, src_image):
     """
     根据相机内参和图像处理步骤计算投影矩阵。
@@ -189,12 +170,7 @@ def get_src_proj_mtx(focal_length_x_norm, focal_length_y_norm, height, width, re
     aspect_wh = 1.0  # 因为图像被缩放为正方形 (res, res)
 
     # 获取投影矩阵
-    src_proj_mtx = get_projection_matrix(
-        fovy=fovy,
-        aspect_wh=aspect_wh,
-        near=near,
-        far=far,
-    ).to(src_image)
+    src_proj_mtx = get_projection_matrix(fovy=fovy, aspect_wh=aspect_wh, near=near, far=far).to(src_image)
 
     return src_proj_mtx
 
@@ -217,7 +193,7 @@ def get_rel_view_mtx(src_wc, tar_wc, src_depth, src_image):
     src_wc = src_wc.float()
     tar_wc = tar_wc.float()
 
-    # 扩展 3x4 外参矩阵到 4x4 矩阵
+    # 将 3x4 外参矩阵扩展为 4x4 矩阵
     def to_4x4(m):
         return torch.cat([m, torch.tensor([[0, 0, 0, 1]], device=m.device, dtype=m.dtype)], dim=0)
 
@@ -227,31 +203,11 @@ def get_rel_view_mtx(src_wc, tar_wc, src_depth, src_image):
     # 计算源相机的 camera2world 矩阵（即 world2camera 的逆）
     src_cam_to_world = torch.inverse(src_wc_4)
 
-    # 提取源相机的位置
-    src_position = src_cam_to_world[:3, 3]
-
-    # 使用 src_depth 计算平均深度
-    mean_depth = src_depth.mean().item()
-
-    # 这里可以根据具体需求调整相机位置，例如：
-    # 调整目标相机的位置，使其基于源深度进行微调
-    # 示例：沿着 z 轴平移 mean_depth
-    adjustment = torch.tensor([0, 0, mean_depth], dtype=src_image.dtype)
-    tar_cam_to_world = torch.inverse(tar_wc_4)
-    tar_position = tar_cam_to_world[:3, 3] + adjustment
-
-    # 更新目标相机的 camera2world 矩阵
-    tar_cam_to_world_adjusted = tar_cam_to_world.clone()
-    tar_cam_to_world_adjusted[:3, 3] = tar_position
-
-    # 将调整后的 camera2world 转回 world2camera
-    tar_wc_adjusted = torch.inverse(tar_cam_to_world_adjusted)
-
-    # 计算相对视图矩阵：调整后的目标 world2camera * 源 camera2world
-    rel_view_mtx = tar_wc_adjusted @ src_cam_to_world  # 结果形状为 (4, 4)
+    # 计算相对视图矩阵：目标 world2camera * 源 camera2world
+    rel_view_mtx = tar_wc_4 @ src_cam_to_world  # 结果形状为 (4, 4)
 
     # 根据 src_image 的设备和数据类型调整输出矩阵
-    return rel_view_mtx.to(src_image.device, src_image.dtype)
+    return rel_view_mtx.to(src_image)
 
 
 def process_one_frame(
@@ -349,7 +305,7 @@ def save_output(output_frames, output_path):
 
     # 释放资源
     out.release()
-    print("视频已保存为 output_video.mp4")
+    print(f"视频已保存为{output_path}")
 
 
 def main(dav2_outdoor, dav2_model, video_file, camera_pose_file, res, output_path):
@@ -399,6 +355,6 @@ if __name__ == "__main__":
     # Resolution (the image will be cropped into square).
     res = 512  # in px
 
-    output_path = "output/4.mp4"
+    output_path = "output/7.mp4"
 
     main(dav2_outdoor, dav2_model, video_file, camera_pose_file, res, output_path)
