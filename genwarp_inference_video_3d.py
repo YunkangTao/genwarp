@@ -1,22 +1,20 @@
 # Load models.
-
 import json
 import os
-import sys
-
-sys.path.append('./extern/Depth-Anything-V2/metric_depth')
 
 import cv2
+import numpy as np
 import torch
+import torch.nn.functional as F
 import torchvision
+from tqdm import tqdm
 
 torchvision.disable_beta_transforms_warning()
-import numpy as np
-import torch.nn.functional as F
-from depth_anything_v2.dpt import DepthAnythingV2
+
+from os.path import basename, splitext
+
 from PIL import Image
-from torchvision.transforms.functional import to_pil_image
-from tqdm import tqdm
+from torchvision.transforms.functional import to_pil_image, to_tensor
 
 from extern.ZoeDepth.zoedepth.utils.misc import colorize
 from genwarp import GenWarp
@@ -40,31 +38,15 @@ def crop(img: Image) -> Image:
     return img.crop((left, top, right, bottom))
 
 
-def prepare_models(dav2_outdoor, dav2_model):
-    dav2_model_configs = {
-        'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]},
-        'vitb': {'encoder': 'vitb', 'features': 128, 'out_channels': [96, 192, 384, 768]},
-        'vitl': {'encoder': 'vitl', 'features': 256, 'out_channels': [256, 512, 1024, 1024]},
-    }
-
-    # Depth Anything V2
-    dav2_model_config = {
-        **dav2_model_configs[dav2_model],
-        # 20 for indoor model, 80 for outdoor model
-        'max_depth': 80 if dav2_outdoor else 20,
-    }
-    depth_anything = DepthAnythingV2(**dav2_model_config)
-
-    # Change the path to the
-    dav2_model_fn = f'depth_anything_v2_metric_{"vkitti" if dav2_outdoor else "hypersim"}_{dav2_model}.pth'
-    depth_anything.load_state_dict(torch.load(f'./checkpoints_dav2/{dav2_model_fn}', map_location='cpu'))
-    depth_anything = depth_anything.to('cuda').eval()
+def prepare_models(zeo_depth_path, genwarp_checkpoints_path):
+    # ZoeDepth
+    zoedepth = torch.hub.load(zeo_depth_path, 'ZoeD_N', source='local', pretrained=True, trust_repo=True).to('cuda')
 
     # GenWarp
-    genwarp_cfg = dict(pretrained_model_path='./checkpoints', checkpoint_name='multi1', half_precision_weights=True)
+    genwarp_cfg = dict(pretrained_model_path=genwarp_checkpoints_path, checkpoint_name='multi1', half_precision_weights=True)
     genwarp_nvs = GenWarp(cfg=genwarp_cfg)
 
-    return depth_anything, genwarp_nvs
+    return zoedepth, genwarp_nvs
 
 
 def prepare_frames(video_file):
@@ -233,21 +215,21 @@ def process_one_frame(
     principal_point_x,
     principal_point_y,
     res,
-    depth_anything,
+    zoedepth,
     genwarp_nvs,
 ):
     # Load an image.
-    # src_image = np.asarray(crop(Image.open(image_file).convert('RGB')).resize((res, res)))
-    src_image = np.asarray(crop(Image.fromarray(src_frame)).resize((res, res)))
-    tar_image = np.asarray(crop(Image.fromarray(tar_frame)).resize((res, res)))
+    # src_image = to_tensor(crop(Image.open(image_file).convert('RGB')).resize((res, res)))[None].cuda()  # BCHW
+    src_image = to_tensor(crop(Image.fromarray(src_frame)).resize((res, res)))[None].cuda()  # BCHW
+    tar_image = to_tensor(crop(Image.fromarray(tar_frame)).resize((res, res)))[None].cuda()
 
     # Estimate the depth.
-    src_depth = depth_anything.infer_image(src_image[..., ::-1].copy())
+    src_depth = zoedepth.infer(src_image)
 
     # Go half precision.
-    tar_image = torch.from_numpy(tar_image / 255.0).permute(2, 0, 1)[None].cuda().half()
-    src_image = torch.from_numpy(src_image / 255.0).permute(2, 0, 1)[None].cuda().half()
-    src_depth = torch.from_numpy(src_depth)[None, None].cuda().half()
+    src_image = src_image.half()
+    tar_image = tar_image.half()
+    src_depth = src_depth.half()
 
     # Projection matrix.
     src_proj_mtx = get_src_proj_mtx(focal_length_x, focal_length_y, height, width, res, src_image)
@@ -320,35 +302,25 @@ def save_output(output_frames, output_path):
     print(f"视频已保存为{output_path}")
 
 
-def process_one_video(video_file, camera_pose_file, res, output_path, depth_anything, genwarp_nvs):
+def process_one_video(video_file, camera_pose_file, res, output_path, zoedepth, genwarp_nvs):
     frames, width, height = prepare_frames(video_file)
     camera_poses = prepare_camera_poses(camera_pose_file)
 
     output_frames = []
+    src_frame = frames[0]
+    src_camera_pose = camera_poses[0]
+    focal_length_x = src_camera_pose[1]
+    focal_length_y = src_camera_pose[2]
+    principal_point_x = src_camera_pose[3]
+    principal_point_y = src_camera_pose[4]
 
-    focal_length_x = camera_poses[0][1]
-    focal_length_y = camera_poses[0][2]
-    principal_point_x = camera_poses[0][3]
-    principal_point_y = camera_poses[0][4]
-
-    idx_frame_out_start = len(frames) // 2
-
-    frames_in = frames[0:idx_frame_out_start]
-    frames_out = frames[idx_frame_out_start:]
-    camera_poses_in = camera_poses[0:idx_frame_out_start]
-    camera_poses_out = camera_poses[idx_frame_out_start:]
-
-    for frame_in, frame_out, camera_pose_in, camera_pose_out in tqdm(
-        zip(frames_in, frames_out, camera_poses_in, camera_poses_out),
-        total=idx_frame_out_start,
-        desc="Processing frames",
-    ):
+    for frame, camera_pose in tqdm(zip(frames, camera_poses), total=len(frames), desc="Processing frames"):
         with torch.no_grad():
             vis = process_one_frame(
-                frame_in,
-                camera_pose_in,
-                frame_out,
-                camera_pose_out,
+                src_frame,
+                src_camera_pose,
+                frame,
+                camera_pose,
                 width,
                 height,
                 focal_length_x,
@@ -356,7 +328,7 @@ def process_one_video(video_file, camera_pose_file, res, output_path, depth_anyt
                 principal_point_x,
                 principal_point_y,
                 res,
-                depth_anything,
+                zoedepth,
                 genwarp_nvs,
             )
         output_frames.append(vis)
@@ -364,8 +336,8 @@ def process_one_video(video_file, camera_pose_file, res, output_path, depth_anyt
     save_output(output_frames, output_path)
 
 
-def main(dav2_outdoor, dav2_model, res, dataset_root_path, json_file_path, output_dataset_path):
-    depth_anything, genwarp_nvs = prepare_models(dav2_outdoor, dav2_model)
+def main(zeo_depth_path, genwarp_checkpoints_path, res, dataset_root_path, json_file_path, output_dataset_path):
+    zoedepth, genwarp_nvs = prepare_models(zeo_depth_path, genwarp_checkpoints_path)
 
     with open(json_file_path, 'r', encoding='utf-8') as file:
         all_data = json.load(file)
@@ -374,19 +346,17 @@ def main(dav2_outdoor, dav2_model, res, dataset_root_path, json_file_path, outpu
         video_file = os.path.join(dataset_root_path, data['video_file_path'])
         camera_pose_file = os.path.join(dataset_root_path, data['camera_file_path'])
         output_path = os.path.join(output_dataset_path, data['video_file_path'])
-        process_one_video(video_file, camera_pose_file, res, output_path, depth_anything, genwarp_nvs)
+        process_one_video(video_file, camera_pose_file, res, output_path, zoedepth, genwarp_nvs)
 
 
 if __name__ == "__main__":
     dataset_root_path = "/mnt/chenyang_lei/Datasets/easyanimate_dataset"
-    json_file_path = "/mnt/chenyang_lei/Datasets/easyanimate_dataset/metadata_kubric_15.json"
+    json_file_path = "/mnt/chenyang_lei/Datasets/easyanimate_dataset/metadata_realestate_96.json"
     output_dataset_path = "/mnt/chenyang_lei/Datasets/easyanimate_dataset/z_mini_datasets_96_warped_videos"
-
-    # Indoor or outdoor model selection for DepthAnythingV2
-    dav2_outdoor = True  # Set True for outdoor, False for indoor
-    dav2_model = 'vitl'  # ['vits', 'vitb', 'vitl']
+    zeo_depth_path = "extern/ZoeDepth"
+    genwarp_checkpoints_path = "checkpoints"
 
     # Resolution (the image will be cropped into square).
     res = 512  # in px
 
-    main(dav2_outdoor, dav2_model, res, dataset_root_path, json_file_path, output_dataset_path)
+    main(zeo_depth_path, genwarp_checkpoints_path, res, dataset_root_path, json_file_path, output_dataset_path)
