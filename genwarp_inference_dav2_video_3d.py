@@ -1,5 +1,7 @@
 # Load models.
 
+import json
+import os
 import sys
 
 sys.path.append('./extern/Depth-Anything-V2/metric_depth')
@@ -175,38 +177,47 @@ def get_src_proj_mtx(focal_length_x_norm, focal_length_y_norm, height, width, re
     return src_proj_mtx
 
 
-def get_rel_view_mtx(src_wc, tar_wc, src_depth, src_image):
-    """
-    计算源相机到目标相机的相对视图矩阵，同时利用源深度信息。
+def convert_camera_extrinsics(w2c):
+    # 获取设备和数据类型，以确保缩放矩阵与w2c在同一设备和数据类型
+    device = w2c.device
+    dtype = w2c.dtype
 
-    参数:
-    - src_wc (torch.Tensor): 源相机的 world2camera 外参矩阵，形状为 (3, 4)。
-    - tar_wc (torch.Tensor): 目标相机的 world2camera 外参矩阵，形状为 (3, 4)。
-    - src_depth (torch.Tensor): 源图像的深度信息，形状为 (N, 1, H, W)。
-    - src_image (torch.Tensor): 源图像，用于确定设备和数据类型。
+    # 定义缩放矩阵，x和y轴取反，z轴保持不变
+    S = torch.diag(torch.tensor([1, -1, -1], device=device, dtype=dtype))
 
-    返回:
-    - rel_view_mtx (torch.Tensor): 相对视图矩阵，形状为 (4, 4)。
-    """
+    # 将缩放矩阵应用于旋转和平移部分
+    R = w2c[:, :3]  # 3x3
+    t = w2c[:, 3]  # 3
 
-    # 确保外参矩阵是浮点类型
-    src_wc = src_wc.float()
-    tar_wc = tar_wc.float()
+    new_R = S @ R  # 矩阵乘法
+    new_t = S @ t  # 向量乘法
 
-    # 将 3x4 外参矩阵扩展为 4x4 矩阵
-    def to_4x4(m):
-        return torch.cat([m, torch.tensor([[0, 0, 0, 1]], device=m.device, dtype=m.dtype)], dim=0)
+    # 构建新的外参矩阵
+    new_w2c = torch.cat((new_R, new_t.unsqueeze(1)), dim=1)  # 3x4
 
-    src_wc_4 = to_4x4(src_wc)  # 源相机的 world2camera，形状 (4, 4)
-    tar_wc_4 = to_4x4(tar_wc)  # 目标相机的 world2camera，形状 (4, 4)
+    return new_w2c
 
-    # 计算源相机的 camera2world 矩阵（即 world2camera 的逆）
-    src_cam_to_world = torch.inverse(src_wc_4)
 
-    # 计算相对视图矩阵：目标 world2camera * 源 camera2world
-    rel_view_mtx = tar_wc_4 @ src_cam_to_world  # 结果形状为 (4, 4)
+def get_rel_view_mtx(src_wc, tar_wc, src_image):
+    src_wc = convert_camera_extrinsics(src_wc)
+    tar_wc = convert_camera_extrinsics(tar_wc)
 
-    # 根据 src_image 的设备和数据类型调整输出矩阵
+    # 将第一个 W2C 矩阵扩展为 4x4 齐次变换矩阵
+    T1 = torch.eye(4, dtype=src_wc.dtype, device=src_wc.device)
+    T1[:3, :3] = src_wc[:, :3]
+    T1[:3, 3] = src_wc[:, 3]
+
+    # 将第二个 W2C 矩阵扩展为 4x4 齐次变换矩阵
+    T2 = torch.eye(4, dtype=tar_wc.dtype, device=tar_wc.device)
+    T2[:3, :3] = tar_wc[:, :3]
+    T2[:3, 3] = tar_wc[:, 3]
+
+    # 计算第一个视图矩阵的逆
+    T1_inv = torch.inverse(T1)
+
+    # 计算相对视图矩阵
+    rel_view_mtx = T2 @ T1_inv
+
     return rel_view_mtx.to(src_image)
 
 
@@ -227,8 +238,8 @@ def process_one_frame(
 ):
     # Load an image.
     # src_image = np.asarray(crop(Image.open(image_file).convert('RGB')).resize((res, res)))
-    tar_image = np.asarray(crop(Image.fromarray(tar_frame)).resize((res, res)))
     src_image = np.asarray(crop(Image.fromarray(src_frame)).resize((res, res)))
+    tar_image = np.asarray(crop(Image.fromarray(tar_frame)).resize((res, res)))
 
     # Estimate the depth.
     src_depth = depth_anything.infer_image(src_image[..., ::-1].copy())
@@ -246,7 +257,7 @@ def process_one_frame(
     src_wc = torch.tensor(src_camera_pose[7:]).reshape((3, 4))
     tar_wc = torch.tensor(tar_camera_pose[7:]).reshape((3, 4))
 
-    rel_view_mtx = get_rel_view_mtx(src_wc, tar_wc, src_depth, src_image)
+    rel_view_mtx = get_rel_view_mtx(src_wc, tar_wc, src_image)
 
     # GenWarp.
     renders = genwarp_nvs(src_image=src_image, src_depth=src_depth, rel_view_mtx=rel_view_mtx, src_proj_mtx=src_proj_mtx, tar_proj_mtx=tar_proj_mtx)
@@ -290,6 +301,7 @@ def save_output(output_frames, output_path):
     fps = 24  # 帧率，可以根据需要调整
 
     # 创建VideoWriter对象
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
     out = cv2.VideoWriter(output_path, fourcc, fps, frame_size)
 
     for img in output_frames:
@@ -308,8 +320,7 @@ def save_output(output_frames, output_path):
     print(f"视频已保存为{output_path}")
 
 
-def main(dav2_outdoor, dav2_model, video_file, camera_pose_file, res, output_path):
-    depth_anything, genwarp_nvs = prepare_models(dav2_outdoor, dav2_model)
+def process_one_video(video_file, camera_pose_file, res, output_path, depth_anything, genwarp_nvs):
     frames, width, height = prepare_frames(video_file)
     camera_poses = prepare_camera_poses(camera_pose_file)
 
@@ -343,18 +354,29 @@ def main(dav2_outdoor, dav2_model, video_file, camera_pose_file, res, output_pat
     save_output(output_frames, output_path)
 
 
+def main(dav2_outdoor, dav2_model, res, dataset_root_path, json_file_path, output_dataset_path):
+    depth_anything, genwarp_nvs = prepare_models(dav2_outdoor, dav2_model)
+
+    with open(json_file_path, 'r', encoding='utf-8') as file:
+        all_data = json.load(file)
+
+    for data in all_data:
+        video_file = os.path.join(dataset_root_path, data['video_file_path'])
+        camera_pose_file = os.path.join(dataset_root_path, data['camera_file_path'])
+        output_path = os.path.join(output_dataset_path, data['video_file_path'])
+        process_one_video(video_file, camera_pose_file, res, output_path, depth_anything, genwarp_nvs)
+
+
 if __name__ == "__main__":
+    dataset_root_path = "/mnt/chenyang_lei/Datasets/easyanimate_dataset"
+    json_file_path = "/mnt/chenyang_lei/Datasets/easyanimate_dataset/metadata_realestate_96.json"
+    output_dataset_path = "/mnt/chenyang_lei/Datasets/easyanimate_dataset/z_mini_datasets_96_warped_videos"
+
     # Indoor or outdoor model selection for DepthAnythingV2
     dav2_outdoor = False  # Set True for outdoor, False for indoor
     dav2_model = 'vitl'  # ['vits', 'vitb', 'vitl']
 
-    # Example.
-    video_file = 'assets/realestate8bd5cb1a874d6fb2.mp4'
-    camera_pose_file = 'assets/realestate8bd5cb1a874d6fb2.txt'
-
     # Resolution (the image will be cropped into square).
     res = 512  # in px
 
-    output_path = "output/7.mp4"
-
-    main(dav2_outdoor, dav2_model, video_file, camera_pose_file, res, output_path)
+    main(dav2_outdoor, dav2_model, res, dataset_root_path, json_file_path, output_dataset_path)
