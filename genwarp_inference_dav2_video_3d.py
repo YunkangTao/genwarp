@@ -288,13 +288,18 @@ def process_one_frame(
     warped_pil = to_pil_image(warped[0])
     synthesized_pil = to_pil_image(synthesized[0])
 
+    warped_array = np.array(warped_pil.convert('L'))
+    mask_array = np.where(warped_array == 0, 255, 0).astype(np.uint8)
+    mask_image = Image.fromarray(mask_array, mode='L')
+
     # Visualise.
-    vis = Image.new('RGB', (res * 5, res * 1))
+    vis = Image.new('RGB', (res * 3, res * 2))
     vis.paste(src_pil, (res * 0, 0))
-    vis.paste(tar_pil, (res * 1, 0))
-    vis.paste(depth_pil, (res * 2, 0))
-    vis.paste(warped_pil, (res * 3, 0))
-    vis.paste(synthesized_pil, (res * 4, 0))
+    vis.paste(depth_pil, (res * 1, 0))
+    vis.paste(warped_pil, (res * 2, 0))
+    vis.paste(synthesized_pil, (res * 0, res * 1))
+    vis.paste(mask_image, (res * 1, res * 1))
+    vis.paste(tar_pil, (res * 2, res * 1))
 
     return vis
 
@@ -386,7 +391,7 @@ def main(dav2_metric, dav2_outdoor, dav2_model, res, dataset_root_path, json_fil
 if __name__ == "__main__":
     dataset_root_path = "/mnt/chenyang_lei/Datasets/easyanimate_dataset"
     json_file_path = "/mnt/chenyang_lei/Datasets/easyanimate_dataset/metadata_realestate_96.json"
-    output_dataset_path = "/mnt/chenyang_lei/Datasets/easyanimate_dataset/z_mini_datasets_96_warped_videos"
+    output_dataset_path = "/mnt/chenyang_lei/Datasets/easyanimate_dataset/z_mini_datasets_warped_videos"
 
     # Indoor or outdoor model selection for DepthAnythingV2
     dav2_metric = True
