@@ -4,8 +4,6 @@ import json
 import os
 import sys
 
-sys.path.append('./extern/Depth-Anything-V2/metric_depth')
-
 import cv2
 import torch
 import torchvision
@@ -13,7 +11,6 @@ import torchvision
 torchvision.disable_beta_transforms_warning()
 import numpy as np
 import torch.nn.functional as F
-from depth_anything_v2.dpt import DepthAnythingV2
 from PIL import Image
 from torchvision.transforms.functional import to_pil_image
 from tqdm import tqdm
@@ -40,25 +37,44 @@ def crop(img: Image) -> Image:
     return img.crop((left, top, right, bottom))
 
 
-def prepare_models(dav2_outdoor, dav2_model):
-    dav2_model_configs = {
-        'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]},
-        'vitb': {'encoder': 'vitb', 'features': 128, 'out_channels': [96, 192, 384, 768]},
-        'vitl': {'encoder': 'vitl', 'features': 256, 'out_channels': [256, 512, 1024, 1024]},
-    }
+def prepare_models(dav2_metric, dav2_outdoor, dav2_model):
 
-    # Depth Anything V2
-    dav2_model_config = {
-        **dav2_model_configs[dav2_model],
-        # 20 for indoor model, 80 for outdoor model
-        'max_depth': 80 if dav2_outdoor else 20,
-    }
-    depth_anything = DepthAnythingV2(**dav2_model_config)
+    if dav2_metric:
+        sys.path.append('./extern/Depth-Anything-V2/metric_depth')
+        from depth_anything_v2.dpt import DepthAnythingV2
 
-    # Change the path to the
-    dav2_model_fn = f'depth_anything_v2_metric_{"vkitti" if dav2_outdoor else "hypersim"}_{dav2_model}.pth'
-    depth_anything.load_state_dict(torch.load(f'./checkpoints_dav2/{dav2_model_fn}', map_location='cpu'))
-    depth_anything = depth_anything.to('cuda').eval()
+        dav2_model_configs = {
+            'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]},
+            'vitb': {'encoder': 'vitb', 'features': 128, 'out_channels': [96, 192, 384, 768]},
+            'vitl': {'encoder': 'vitl', 'features': 256, 'out_channels': [256, 512, 1024, 1024]},
+        }
+
+        # Depth Anything V2
+        dav2_model_config = {
+            **dav2_model_configs[dav2_model],
+            # 20 for indoor model, 80 for outdoor model
+            'max_depth': 80 if dav2_outdoor else 20,
+        }
+        depth_anything = DepthAnythingV2(**dav2_model_config)
+
+        # Change the path to the
+        dav2_model_fn = f'depth_anything_v2_metric_{"vkitti" if dav2_outdoor else "hypersim"}_{dav2_model}.pth'
+        depth_anything.load_state_dict(torch.load(f'./checkpoints_dav2/{dav2_model_fn}', map_location='cpu'))
+        depth_anything = depth_anything.to('cuda').eval()
+    else:
+        sys.path.append('extern/Depth-Anything-V2')
+        from depth_anything_v2.dpt import DepthAnythingV2
+
+        model_configs = {
+            'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]},
+            'vitb': {'encoder': 'vitb', 'features': 128, 'out_channels': [96, 192, 384, 768]},
+            'vitl': {'encoder': 'vitl', 'features': 256, 'out_channels': [256, 512, 1024, 1024]},
+            'vitg': {'encoder': 'vitg', 'features': 384, 'out_channels': [1536, 1536, 1536, 1536]},
+        }
+
+        depth_anything = DepthAnythingV2(**model_configs[dav2_model])
+        depth_anything.load_state_dict(torch.load(f'checkpoints_dav2/depth_anything_v2_{dav2_model}.pth', map_location='cpu'))
+        depth_anything = depth_anything.to('cuda').eval()
 
     # GenWarp
     genwarp_cfg = dict(pretrained_model_path='./checkpoints', checkpoint_name='multi1', half_precision_weights=True)
@@ -354,8 +370,8 @@ def process_one_video(video_file, camera_pose_file, res, output_path, depth_anyt
     save_output(output_frames, output_path)
 
 
-def main(dav2_outdoor, dav2_model, res, dataset_root_path, json_file_path, output_dataset_path):
-    depth_anything, genwarp_nvs = prepare_models(dav2_outdoor, dav2_model)
+def main(dav2_metric, dav2_outdoor, dav2_model, res, dataset_root_path, json_file_path, output_dataset_path):
+    depth_anything, genwarp_nvs = prepare_models(dav2_metric, dav2_outdoor, dav2_model)
 
     with open(json_file_path, 'r', encoding='utf-8') as file:
         all_data = json.load(file)
@@ -373,10 +389,11 @@ if __name__ == "__main__":
     output_dataset_path = "/mnt/chenyang_lei/Datasets/easyanimate_dataset/z_mini_datasets_96_warped_videos"
 
     # Indoor or outdoor model selection for DepthAnythingV2
+    dav2_metric = True
     dav2_outdoor = False  # Set True for outdoor, False for indoor
     dav2_model = 'vitl'  # ['vits', 'vitb', 'vitl']
 
     # Resolution (the image will be cropped into square).
     res = 512  # in px
 
-    main(dav2_outdoor, dav2_model, res, dataset_root_path, json_file_path, output_dataset_path)
+    main(dav2_metric, dav2_outdoor, dav2_model, res, dataset_root_path, json_file_path, output_dataset_path)
