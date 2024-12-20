@@ -391,7 +391,7 @@ def main(dav2_metric, dav2_outdoor, dav2_model, res, dataset_root_path, json_fil
 if __name__ == "__main__":
     dataset_root_path = "/mnt/chenyang_lei/Datasets/easyanimate_dataset"
     json_file_path = "/mnt/chenyang_lei/Datasets/easyanimate_dataset/metadata_realestate_96.json"
-    output_dataset_path = "/mnt/chenyang_lei/Datasets/easyanimate_dataset/z_mini_datasets_warped_videos"
+    output_dataset_path = "/mnt/chenyang_lei/Datasets/easyanimate_dataset/z_mini_datasets_warped_videos_2_3"
 
     # Indoor or outdoor model selection for DepthAnythingV2
     dav2_metric = True
