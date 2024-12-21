@@ -2,6 +2,7 @@
 
 import json
 import os
+import random
 import sys
 
 import cv2
@@ -347,14 +348,77 @@ def save_output(output_frames, output_path):
     logging.info(f"视频已保存为{output_path}")
 
 
-def process_one_video(video_file, camera_pose_file, res, output_path, depth_anything, genwarp_nvs, min_frames, device):
-    frames, width, height = prepare_frames(video_file)
-    if len(frames) < min_frames:
-        return False
+def pre_process_frames_poses(frames, camera_poses, output_frames):
+    total_frames = len(frames)
 
+    # 计算有效采样区域的起始和结束帧数
+    start_drop = int(0.1 * total_frames)
+    end_drop = int(0.9 * total_frames)
+    valid_length = end_drop - start_drop  # 有效采样区域的总帧数
+
+    if valid_length <= 0:
+        return False, frames, camera_poses
+
+    # 动态计算 stride，使其在1到3之间，并尽可能接近 video_sample_n_frames
+    # 尝试从 stride=3 开始，如果无法满足，则减小 stride
+    for stride in range(3, 0, -1):
+        possible_max_frames = (valid_length + stride - 1) // stride  # 向上取整
+        if possible_max_frames >= output_frames:
+            chosen_stride = stride
+            break
+    else:
+        # 如果 stride=1 也无法满足，则选择 stride=1 并尽可能采样多的帧
+        chosen_stride = 1
+
+    # 计算实际可以采样的帧数
+    possible_frames = (valid_length + chosen_stride - 1) // chosen_stride
+
+    if possible_frames < output_frames:
+        return False, frames, camera_poses
+
+    min_sample_n_frames = min(output_frames, possible_frames)
+
+    if min_sample_n_frames == 0:
+        return False, frames, camera_poses
+
+    # 计算片段的总长度
+    clip_length = (min_sample_n_frames - 1) * chosen_stride + 1
+    if clip_length > valid_length:
+        clip_length = valid_length
+        min_sample_n_frames = (clip_length + chosen_stride - 1) // chosen_stride
+
+    # 随机选择起始索引
+    if valid_length != clip_length:
+        start_idx_lower = start_drop
+        start_idx_upper = end_drop - clip_length
+        if start_idx_upper < start_idx_lower:
+            start_idx_upper = start_idx_lower  # 防止随机范围出现负值
+        start_idx = random.randint(start_idx_lower, start_idx_upper)
+    else:
+        start_idx = start_drop
+
+    # 生成采样帧的索引
+    batch_index = np.linspace(start_idx, start_idx + clip_length - 1, min_sample_n_frames, dtype=int)
+
+    frames = [frames[i] for i in batch_index]
+    camera_poses = [camera_poses[i] for i in batch_index]
+
+    return True, frames, camera_poses
+
+
+def process_one_video(video_file, camera_pose_file, res, output_path, depth_anything, genwarp_nvs, output_frames, device):
+    frames, width, height = prepare_frames(video_file)
     camera_poses = prepare_camera_poses(camera_pose_file)
 
-    if len(frames) != len(frames):
+    well_done, frames, camera_poses = pre_process_frames_poses(frames, camera_poses, output_frames)
+
+    if not well_done:
+        return False
+
+    if len(frames) != output_frames:
+        return False
+
+    if len(frames) != len(camera_poses):
         return False
 
     # frames = [frame.to(device) for frame in frames]
@@ -392,18 +456,14 @@ def process_one_video(video_file, camera_pose_file, res, output_path, depth_anyt
     return True
 
 
-def worker(worker_id, dav2_metric, dav2_outdoor, dav2_model, res, dataset_root_path, data_subset, output_dataset_path, min_frames, queue):
+def worker(worker_id, gpu_id, dav2_metric, dav2_outdoor, dav2_model, res, dataset_root_path, data_subset, output_dataset_path, output_frames, queue):
     try:
-        device = f'cuda:{worker_id}'
+        device = f'cuda:{gpu_id}'
         torch.cuda.set_device(device)
         logging.info(f"Worker {worker_id} initializing on {device}")
 
         # 初始化模型
         depth_anything, genwarp_nvs = prepare_models(dav2_metric, dav2_outdoor, dav2_model, device)
-
-        # # 打印模型所在设备
-        # logging.info(f"Worker {worker_id} - depth_anything is on {next(depth_anything.parameters()).device}")
-        # logging.info(f"Worker {worker_id} - genwarp_nvs is on {next(genwarp_nvs.parameters()).device}")
 
         done_data = []
         for data in data_subset:
@@ -411,7 +471,7 @@ def worker(worker_id, dav2_metric, dav2_outdoor, dav2_model, res, dataset_root_p
             camera_pose_file = os.path.join(dataset_root_path, data['camera_file_path'])
             output_path = os.path.join(output_dataset_path, data['video_file_path'])
             # 传递 device 到 process_one_video
-            well_done = process_one_video(video_file, camera_pose_file, res, output_path, depth_anything, genwarp_nvs, min_frames, device)
+            well_done = process_one_video(video_file, camera_pose_file, res, output_path, depth_anything, genwarp_nvs, output_frames, device)
             if well_done:
                 done_data.append(data)
 
@@ -422,31 +482,50 @@ def worker(worker_id, dav2_metric, dav2_outdoor, dav2_model, res, dataset_root_p
         queue.put([])
 
 
-def main(dav2_metric, dav2_outdoor, dav2_model, res, dataset_root_path, json_file_path, output_dataset_path, output_json_file, min_frames):
+def main(dav2_metric, dav2_outdoor, dav2_model, res, dataset_root_path, json_file_path, output_dataset_path, output_json_file, output_frames):
     with open(json_file_path, 'r', encoding='utf-8') as file:
         all_data = json.load(file)
 
+    all_data = all_data[97:2101]
     num_gpus = 4
+    processes_per_gpu = 2
+    total_processes = num_gpus * processes_per_gpu
     available_gpus = torch.cuda.device_count()
     if available_gpus < num_gpus:
         raise ValueError(f"需要至少 {num_gpus} 张 GPU，但当前只有 {available_gpus} 张可用。")
 
     # 将数据均分为 num_gpus 份
-    data_splits = [[] for _ in range(num_gpus)]
+    data_splits = [[] for _ in range(total_processes)]
     for idx, data in enumerate(all_data):
-        data_splits[idx % num_gpus].append(data)
+        data_splits[idx % total_processes].append(data)
 
     processes = []
     queue = Queue()
 
-    for worker_id in range(num_gpus):
-        p = Process(target=worker, args=(worker_id, dav2_metric, dav2_outdoor, dav2_model, res, dataset_root_path, data_splits[worker_id], output_dataset_path, min_frames, queue))
+    for process_id in range(total_processes):
+        gpu_id = process_id % num_gpus
+        p = Process(
+            target=worker,
+            args=(
+                process_id,
+                gpu_id,
+                dav2_metric,
+                dav2_outdoor,
+                dav2_model,
+                res,
+                dataset_root_path,
+                data_splits[process_id],
+                output_dataset_path,
+                output_frames,
+                queue,
+            ),
+        )
         p.start()
         processes.append(p)
 
     # 收集所有 done_data
     done_data = []
-    for _ in range(num_gpus):
+    for _ in range(total_processes):
         done_data.extend(queue.get())
 
     for p in processes:
@@ -462,9 +541,9 @@ if __name__ == "__main__":
     multiprocessing.set_start_method('spawn')
 
     dataset_root_path = "/mnt/chenyang_lei/Datasets/easyanimate_dataset"
-    json_file_path = "/mnt/chenyang_lei/Datasets/easyanimate_dataset/metadata_realestate_96.json"
-    output_dataset_path = "/mnt/chenyang_lei/Datasets/easyanimate_dataset/z_mini_datasets_warped_videos_2_3_test"
-    output_json_file = "/mnt/chenyang_lei/Datasets/easyanimate_dataset/z_mini_datasets_warped_videos_2_3_test/metadata.json"
+    json_file_path = "/mnt/chenyang_lei/Datasets/easyanimate_dataset/metadata_realestate.json"
+    output_dataset_path = "/mnt/chenyang_lei/Datasets/easyanimate_dataset/z_mini_datasets_warped_videos_2_3_97_2100"
+    output_json_file = "/mnt/chenyang_lei/Datasets/easyanimate_dataset/z_mini_datasets_warped_videos_2_3_97_2100/metadata97_2100.json"
 
     # Indoor or outdoor model selection for DepthAnythingV2
     dav2_metric = True
@@ -474,6 +553,6 @@ if __name__ == "__main__":
     # Resolution (the image will be cropped into square).
     res = 512  # in px
 
-    min_frames = 55
+    output_frames = 49
 
-    main(dav2_metric, dav2_outdoor, dav2_model, res, dataset_root_path, json_file_path, output_dataset_path, output_json_file, min_frames)
+    main(dav2_metric, dav2_outdoor, dav2_model, res, dataset_root_path, json_file_path, output_dataset_path, output_json_file, output_frames)
