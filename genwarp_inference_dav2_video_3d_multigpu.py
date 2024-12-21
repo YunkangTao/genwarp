@@ -23,7 +23,12 @@ from genwarp.ops import (
     get_projection_matrix,
     sph2cart,
 )
+import multiprocessing
 from multiprocessing import Process, Queue
+import logging
+
+# 在主进程中设置日志配置
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
 # Crop the image to the shorter side.
@@ -79,8 +84,7 @@ def prepare_models(dav2_metric, dav2_outdoor, dav2_model, device):
 
     # GenWarp
     genwarp_cfg = dict(pretrained_model_path='./checkpoints', checkpoint_name='multi1', half_precision_weights=True)
-    genwarp_nvs = GenWarp(cfg=genwarp_cfg)
-    genwarp_nvs = genwarp_nvs.to(device).eval()
+    genwarp_nvs = GenWarp(cfg=genwarp_cfg, device=device)
 
     return depth_anything, genwarp_nvs
 
@@ -125,7 +129,7 @@ def prepare_camera_poses(camera_pose_file):
 
         # 确保文件至少有两行
         if len(lines) < 2:
-            print("文件内容不足两行，无法读取数据。")
+            logging.info("文件内容不足两行，无法读取数据。")
             return whole_camera_para
 
         # 跳过第一行，从第二行开始处理
@@ -135,7 +139,7 @@ def prepare_camera_poses(camera_pose_file):
 
             # 检查每行是否有19个数字
             if len(parts) != 19:
-                print(f"警告：第 {idx} 行的数字数量不是19，跳过该行。")
+                logging.info(f"警告：第 {idx} 行的数字数量不是19，跳过该行。")
                 continue
 
             try:
@@ -143,7 +147,7 @@ def prepare_camera_poses(camera_pose_file):
                 numbers = [float(part) for part in parts]
                 whole_camera_para.append(numbers)
             except ValueError as ve:
-                print(f"警告：第 {idx} 行包含非数字字符，跳过该行。错误详情: {ve}")
+                logging.info(f"警告：第 {idx} 行包含非数字字符，跳过该行。错误详情: {ve}")
                 continue
 
     return whole_camera_para
@@ -308,7 +312,7 @@ def process_one_frame(
 
 def save_output(output_frames, output_path):
     # output_frames.save(output_path)
-    # print(f"图像已保存到 {output_path}")
+    # logging.info(f"图像已保存到 {output_path}")
     # 检查列表是否为空
     if not output_frames:
         raise ValueError("图片列表为空！")
@@ -340,10 +344,10 @@ def save_output(output_frames, output_path):
 
     # 释放资源
     out.release()
-    print(f"视频已保存为{output_path}")
+    logging.info(f"视频已保存为{output_path}")
 
 
-def process_one_video(video_file, camera_pose_file, res, output_path, depth_anything, genwarp_nvs, min_frames):
+def process_one_video(video_file, camera_pose_file, res, output_path, depth_anything, genwarp_nvs, min_frames, device):
     frames, width, height = prepare_frames(video_file)
     if len(frames) < min_frames:
         return False
@@ -353,6 +357,9 @@ def process_one_video(video_file, camera_pose_file, res, output_path, depth_anyt
     if len(frames) != len(frames):
         return False
 
+    frames = [frame.to(device) for frame in frames]
+    camera_poses = [camera_pose.to(device) for camera_pose in camera_poses]
+
     output_frames = []
     src_frame = frames[0]
     src_camera_pose = camera_poses[0]
@@ -361,7 +368,7 @@ def process_one_video(video_file, camera_pose_file, res, output_path, depth_anyt
     principal_point_x = src_camera_pose[3]
     principal_point_y = src_camera_pose[4]
 
-    for frame, camera_pose in tqdm(zip(frames, camera_poses), total=len(frames), desc="Processing frames"):
+    for frame, camera_pose in zip(frames, camera_poses):
         with torch.no_grad():
             vis = process_one_frame(
                 src_frame,
@@ -386,22 +393,33 @@ def process_one_video(video_file, camera_pose_file, res, output_path, depth_anyt
 
 
 def worker(worker_id, dav2_metric, dav2_outdoor, dav2_model, res, dataset_root_path, data_subset, output_dataset_path, min_frames, queue):
-    device = f'cuda:{worker_id}'
-    print(f"Worker {worker_id} initializing on {device}")
+    try:
+        device = f'cuda:{worker_id}'
+        torch.cuda.set_device(device)
+        logging.info(f"Worker {worker_id} initializing on {device}")
 
-    depth_anything, genwarp_nvs = prepare_models(dav2_metric, dav2_outdoor, dav2_model, device)
+        # 初始化模型
+        depth_anything, genwarp_nvs = prepare_models(dav2_metric, dav2_outdoor, dav2_model, device)
 
-    done_data = []
-    for data in data_subset:
-        video_file = os.path.join(dataset_root_path, data['video_file_path'])
-        camera_pose_file = os.path.join(dataset_root_path, data['camera_file_path'])
-        output_path = os.path.join(output_dataset_path, data['video_file_path'])
-        well_done = process_one_video(video_file, camera_pose_file, res, output_path, depth_anything, genwarp_nvs, min_frames)
-        if well_done:
-            done_data.append(data)
+        # 打印模型所在设备
+        logging.info(f"Worker {worker_id} - depth_anything is on {next(depth_anything.parameters()).device}")
+        logging.info(f"Worker {worker_id} - genwarp_nvs is on {next(genwarp_nvs.parameters()).device}")
 
-    print(f"Worker {worker_id} completed with {len(done_data)} processed items.")
-    queue.put(done_data)
+        done_data = []
+        for data in data_subset:
+            video_file = os.path.join(dataset_root_path, data['video_file_path'])
+            camera_pose_file = os.path.join(dataset_root_path, data['camera_file_path'])
+            output_path = os.path.join(output_dataset_path, data['video_file_path'])
+            # 传递 device 到 process_one_video
+            well_done = process_one_video(video_file, camera_pose_file, res, output_path, depth_anything, genwarp_nvs, min_frames, device)
+            if well_done:
+                done_data.append(data)
+
+        logging.info(f"Worker {worker_id} completed with {len(done_data)} processed items.")
+        queue.put(done_data)
+    except Exception as e:
+        logging.error(f"Worker {worker_id} encountered an error: {e}")
+        queue.put([])
 
 
 def main(dav2_metric, dav2_outdoor, dav2_model, res, dataset_root_path, json_file_path, output_dataset_path, output_json_file, min_frames):
@@ -409,8 +427,9 @@ def main(dav2_metric, dav2_outdoor, dav2_model, res, dataset_root_path, json_fil
         all_data = json.load(file)
 
     num_gpus = 4
-    if torch.cuda.device_count() < num_gpus:
-        raise ValueError(f"需要至少 {num_gpus} 张 GPU，但当前只有 {torch.cuda.device_count()} 张可用。")
+    available_gpus = torch.cuda.device_count()
+    if available_gpus < num_gpus:
+        raise ValueError(f"需要至少 {num_gpus} 张 GPU，但当前只有 {available_gpus} 张可用。")
 
     # 将数据均分为 num_gpus 份
     data_splits = [[] for _ in range(num_gpus)]
@@ -436,10 +455,12 @@ def main(dav2_metric, dav2_outdoor, dav2_model, res, dataset_root_path, json_fil
     with open(output_json_file, 'w', encoding='utf-8') as file:
         json.dump(done_data, file, ensure_ascii=False, indent=4)
 
-    print(f"所有数据处理完成，共计处理 {len(done_data)} 个项目。")
+    logging.info(f"所有数据处理完成，共计处理 {len(done_data)} 个项目。")
 
 
 if __name__ == "__main__":
+    multiprocessing.set_start_method('spawn')
+
     dataset_root_path = "/mnt/chenyang_lei/Datasets/easyanimate_dataset"
     json_file_path = "/mnt/chenyang_lei/Datasets/easyanimate_dataset/metadata_realestate_96.json"
     output_dataset_path = "/mnt/chenyang_lei/Datasets/easyanimate_dataset/z_mini_datasets_warped_videos_2_3_test"
