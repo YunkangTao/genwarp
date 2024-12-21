@@ -23,6 +23,7 @@ from genwarp.ops import (
     get_projection_matrix,
     sph2cart,
 )
+from multiprocessing import Process, Queue
 
 
 # Crop the image to the shorter side.
@@ -37,7 +38,7 @@ def crop(img: Image) -> Image:
     return img.crop((left, top, right, bottom))
 
 
-def prepare_models(dav2_metric, dav2_outdoor, dav2_model):
+def prepare_models(dav2_metric, dav2_outdoor, dav2_model, device):
 
     if dav2_metric:
         sys.path.append('./extern/Depth-Anything-V2/metric_depth')
@@ -60,7 +61,7 @@ def prepare_models(dav2_metric, dav2_outdoor, dav2_model):
         # Change the path to the
         dav2_model_fn = f'depth_anything_v2_metric_{"vkitti" if dav2_outdoor else "hypersim"}_{dav2_model}.pth'
         depth_anything.load_state_dict(torch.load(f'./checkpoints_dav2/{dav2_model_fn}', map_location='cpu'))
-        depth_anything = depth_anything.to('cuda').eval()
+        depth_anything = depth_anything.to(device).eval()
     else:
         sys.path.append('extern/Depth-Anything-V2')
         from depth_anything_v2.dpt import DepthAnythingV2
@@ -74,11 +75,12 @@ def prepare_models(dav2_metric, dav2_outdoor, dav2_model):
 
         depth_anything = DepthAnythingV2(**model_configs[dav2_model])
         depth_anything.load_state_dict(torch.load(f'checkpoints_dav2/depth_anything_v2_{dav2_model}.pth', map_location='cpu'))
-        depth_anything = depth_anything.to('cuda').eval()
+        depth_anything = depth_anything.to(device).eval()
 
     # GenWarp
     genwarp_cfg = dict(pretrained_model_path='./checkpoints', checkpoint_name='multi1', half_precision_weights=True)
     genwarp_nvs = GenWarp(cfg=genwarp_cfg)
+    genwarp_nvs = genwarp_nvs.to(device).eval()
 
     return depth_anything, genwarp_nvs
 
@@ -383,14 +385,14 @@ def process_one_video(video_file, camera_pose_file, res, output_path, depth_anyt
     return True
 
 
-def main(dav2_metric, dav2_outdoor, dav2_model, res, dataset_root_path, json_file_path, output_dataset_path, output_json_file, min_frames):
-    depth_anything, genwarp_nvs = prepare_models(dav2_metric, dav2_outdoor, dav2_model)
+def worker(worker_id, dav2_metric, dav2_outdoor, dav2_model, res, dataset_root_path, data_subset, output_dataset_path, min_frames, queue):
+    device = f'cuda:{worker_id}'
+    print(f"Worker {worker_id} initializing on {device}")
 
-    with open(json_file_path, 'r', encoding='utf-8') as file:
-        all_data = json.load(file)
+    depth_anything, genwarp_nvs = prepare_models(dav2_metric, dav2_outdoor, dav2_model, device)
 
     done_data = []
-    for data in all_data:
+    for data in data_subset:
         video_file = os.path.join(dataset_root_path, data['video_file_path'])
         camera_pose_file = os.path.join(dataset_root_path, data['camera_file_path'])
         output_path = os.path.join(output_dataset_path, data['video_file_path'])
@@ -398,8 +400,43 @@ def main(dav2_metric, dav2_outdoor, dav2_model, res, dataset_root_path, json_fil
         if well_done:
             done_data.append(data)
 
+    print(f"Worker {worker_id} completed with {len(done_data)} processed items.")
+    queue.put(done_data)
+
+
+def main(dav2_metric, dav2_outdoor, dav2_model, res, dataset_root_path, json_file_path, output_dataset_path, output_json_file, min_frames):
+    with open(json_file_path, 'r', encoding='utf-8') as file:
+        all_data = json.load(file)
+
+    num_gpus = 4
+    if torch.cuda.device_count() < num_gpus:
+        raise ValueError(f"需要至少 {num_gpus} 张 GPU，但当前只有 {torch.cuda.device_count()} 张可用。")
+
+    # 将数据均分为 num_gpus 份
+    data_splits = [[] for _ in range(num_gpus)]
+    for idx, data in enumerate(all_data):
+        data_splits[idx % num_gpus].append(data)
+
+    processes = []
+    queue = Queue()
+
+    for worker_id in range(num_gpus):
+        p = Process(target=worker, args=(worker_id, dav2_metric, dav2_outdoor, dav2_model, res, dataset_root_path, data_splits[worker_id], output_dataset_path, min_frames, queue))
+        p.start()
+        processes.append(p)
+
+    # 收集所有 done_data
+    done_data = []
+    for _ in range(num_gpus):
+        done_data.extend(queue.get())
+
+    for p in processes:
+        p.join()
+
     with open(output_json_file, 'w', encoding='utf-8') as file:
         json.dump(done_data, file, ensure_ascii=False, indent=4)
+
+    print(f"所有数据处理完成，共计处理 {len(done_data)} 个项目。")
 
 
 if __name__ == "__main__":
