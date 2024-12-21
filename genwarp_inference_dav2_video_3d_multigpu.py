@@ -357,8 +357,8 @@ def process_one_video(video_file, camera_pose_file, res, output_path, depth_anyt
     if len(frames) != len(frames):
         return False
 
-    frames = [frame.to(device) for frame in frames]
-    camera_poses = [camera_pose.to(device) for camera_pose in camera_poses]
+    # frames = [frame.to(device) for frame in frames]
+    # camera_poses = [camera_pose.to(device) for camera_pose in camera_poses]
 
     output_frames = []
     src_frame = frames[0]
@@ -401,9 +401,9 @@ def worker(worker_id, dav2_metric, dav2_outdoor, dav2_model, res, dataset_root_p
         # 初始化模型
         depth_anything, genwarp_nvs = prepare_models(dav2_metric, dav2_outdoor, dav2_model, device)
 
-        # 打印模型所在设备
-        logging.info(f"Worker {worker_id} - depth_anything is on {next(depth_anything.parameters()).device}")
-        logging.info(f"Worker {worker_id} - genwarp_nvs is on {next(genwarp_nvs.parameters()).device}")
+        # # 打印模型所在设备
+        # logging.info(f"Worker {worker_id} - depth_anything is on {next(depth_anything.parameters()).device}")
+        # logging.info(f"Worker {worker_id} - genwarp_nvs is on {next(genwarp_nvs.parameters()).device}")
 
         done_data = []
         for data in data_subset:
