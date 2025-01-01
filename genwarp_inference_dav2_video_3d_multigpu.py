@@ -129,6 +129,8 @@ def prepare_camera_poses(camera_pose_file):
         # 读取所有行
         lines = file.readlines()
 
+        title = lines[0].strip()
+
         # 确保文件至少有两行
         if len(lines) < 2:
             logging.info("文件内容不足两行，无法读取数据。")
@@ -152,7 +154,7 @@ def prepare_camera_poses(camera_pose_file):
                 logging.info(f"警告：第 {idx} 行包含非数字字符，跳过该行。错误详情: {ve}")
                 continue
 
-    return whole_camera_para
+    return title, whole_camera_para
 
 
 def get_src_proj_mtx(focal_length_x_norm, focal_length_y_norm, height, width, res, src_image):
@@ -349,6 +351,19 @@ def save_output(output_frames, output_path):
     logging.info(f"视频已保存为{output_path}")
 
 
+def save_pose_file(title, camera_poses, output_path):
+    with open(output_path, 'w', encoding='utf-8') as file:
+        # 写入标题行
+        file.write(title + '\n')
+
+        # 写入相机参数
+        for camera_pose in camera_poses:
+            camera_pose_str = ' '.join(map(str, camera_pose))
+            file.write(camera_pose_str + '\n')
+
+    logging.info(f"相机参数已保存到 {output_path}")
+
+
 def pre_process_frames_poses(frames, camera_poses, output_frames):
     total_frames = len(frames)
 
@@ -407,9 +422,9 @@ def pre_process_frames_poses(frames, camera_poses, output_frames):
     return True, frames, camera_poses
 
 
-def process_one_video(video_file, camera_pose_file, res, output_path, depth_anything, genwarp_nvs, output_frames, device):
+def process_one_video(video_file, camera_pose_file, res, video_output_path, pose_file_output_path, depth_anything, genwarp_nvs, output_frames):
     frames, width, height = prepare_frames(video_file)
-    camera_poses = prepare_camera_poses(camera_pose_file)
+    title, camera_poses = prepare_camera_poses(camera_pose_file)
 
     well_done, frames, camera_poses = pre_process_frames_poses(frames, camera_poses, output_frames)
 
@@ -452,7 +467,8 @@ def process_one_video(video_file, camera_pose_file, res, output_path, depth_anyt
             )
         output_frames.append(vis)
 
-    save_output(output_frames, output_path)
+    save_output(output_frames, video_output_path)
+    save_pose_file(title, camera_poses, pose_file_output_path)
 
     return True
 
@@ -470,9 +486,10 @@ def worker(worker_id, gpu_id, dav2_metric, dav2_outdoor, dav2_model, res, datase
         for data in data_subset:
             video_file = os.path.join(dataset_root_path, data['video_file_path'])
             camera_pose_file = os.path.join(dataset_root_path, data['camera_file_path'])
-            output_path = os.path.join(output_dataset_path, data['video_file_path'])
+            video_output_path = os.path.join(output_dataset_path, data['video_file_path'])
+            pose_file_output_path = os.path.join(output_dataset_path, data['camera_file_path'])
             # 传递 device 到 process_one_video
-            well_done = process_one_video(video_file, camera_pose_file, res, output_path, depth_anything, genwarp_nvs, output_frames, device)
+            well_done = process_one_video(video_file, camera_pose_file, res, video_output_path, pose_file_output_path, depth_anything, genwarp_nvs, output_frames)
             if well_done:
                 done_data.append(data)
 
@@ -489,7 +506,7 @@ def main(dav2_metric, dav2_outdoor, dav2_model, res, dataset_root_path, json_fil
 
     # all_data = all_data[10001:]
     num_gpus = 4
-    processes_per_gpu = 2
+    processes_per_gpu = 8
     total_processes = num_gpus * processes_per_gpu
     available_gpus = torch.cuda.device_count()
     if available_gpus < num_gpus:
