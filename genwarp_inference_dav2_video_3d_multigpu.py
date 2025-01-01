@@ -10,6 +10,10 @@ import torch
 import torchvision
 
 torchvision.disable_beta_transforms_warning()
+import logging
+import multiprocessing
+from multiprocessing import Process, Queue
+
 import numpy as np
 import torch.nn.functional as F
 from PIL import Image
@@ -24,9 +28,6 @@ from genwarp.ops import (
     get_projection_matrix,
     sph2cart,
 )
-import multiprocessing
-from multiprocessing import Process, Queue
-import logging
 
 # 在主进程中设置日志配置
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -286,14 +287,14 @@ def process_one_frame(
     renders = genwarp_nvs(src_image=src_image, src_depth=src_depth, rel_view_mtx=rel_view_mtx, src_proj_mtx=src_proj_mtx, tar_proj_mtx=tar_proj_mtx)
 
     warped = renders['warped']
-    synthesized = renders['synthesized']
+    # synthesized = renders['synthesized']
 
     # To pil image.
     src_pil = to_pil_image(src_image[0])
     tar_pil = to_pil_image(tar_image[0])
     depth_pil = to_pil_image(colorize(src_depth[0].float()))
     warped_pil = to_pil_image(warped[0])
-    synthesized_pil = to_pil_image(synthesized[0])
+    synthesized_pil = to_pil_image(warped[0])
 
     warped_array = np.array(warped_pil.convert('L'))
     mask_array = np.where(warped_array == 0, 255, 0).astype(np.uint8)
@@ -486,7 +487,7 @@ def main(dav2_metric, dav2_outdoor, dav2_model, res, dataset_root_path, json_fil
     with open(json_file_path, 'r', encoding='utf-8') as file:
         all_data = json.load(file)
 
-    all_data = all_data[97:2101]
+    # all_data = all_data[10001:]
     num_gpus = 4
     processes_per_gpu = 2
     total_processes = num_gpus * processes_per_gpu
@@ -540,10 +541,10 @@ def main(dav2_metric, dav2_outdoor, dav2_model, res, dataset_root_path, json_fil
 if __name__ == "__main__":
     multiprocessing.set_start_method('spawn')
 
-    dataset_root_path = "/mnt/chenyang_lei/Datasets/easyanimate_dataset"
-    json_file_path = "/mnt/chenyang_lei/Datasets/easyanimate_dataset/metadata_realestate.json"
-    output_dataset_path = "/mnt/chenyang_lei/Datasets/easyanimate_dataset/z_mini_datasets_warped_videos_2_3_97_2100"
-    output_json_file = "/mnt/chenyang_lei/Datasets/easyanimate_dataset/z_mini_datasets_warped_videos_2_3_97_2100/metadata97_2100.json"
+    dataset_root_path = "/mnt/chenyang_lei/Datasets/easyanimate_dataset/EvaluationSet/RealEstate10KBeforeProcess"
+    json_file_path = "/mnt/chenyang_lei/Datasets/easyanimate_dataset/EvaluationSet/RealEstate10KBeforeProcess/metadata.json"
+    output_dataset_path = "/mnt/chenyang_lei/Datasets/easyanimate_dataset/EvaluationSet/RealEstate10K"
+    output_json_file = "/mnt/chenyang_lei/Datasets/easyanimate_dataset/EvaluationSet/RealEstate10K/metadata.json"
 
     # Indoor or outdoor model selection for DepthAnythingV2
     dav2_metric = True
