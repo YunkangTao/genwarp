@@ -2,3 +2,4 @@ checkpoints*/
 output*/
 **/__pycache__/
 .vscode/
+logfile.txt

@@ -30,7 +30,12 @@ from genwarp.ops import (
 )
 
 # 在主进程中设置日志配置
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    filename='logfile.txt',  # 指定日志文件名
+    filemode='a',
+)
 
 
 # Crop the image to the shorter side.
@@ -484,14 +489,18 @@ def worker(worker_id, gpu_id, dav2_metric, dav2_outdoor, dav2_model, res, datase
 
         done_data = []
         for data in data_subset:
-            video_file = os.path.join(dataset_root_path, data['video_file_path'])
-            camera_pose_file = os.path.join(dataset_root_path, data['camera_file_path'])
-            video_output_path = os.path.join(output_dataset_path, data['video_file_path'])
-            pose_file_output_path = os.path.join(output_dataset_path, data['camera_file_path'])
-            # 传递 device 到 process_one_video
-            well_done = process_one_video(video_file, camera_pose_file, res, video_output_path, pose_file_output_path, depth_anything, genwarp_nvs, output_frames)
-            if well_done:
-                done_data.append(data)
+            try:
+                video_file = os.path.join(dataset_root_path, data['video_file_path'])
+                camera_pose_file = os.path.join(dataset_root_path, data['camera_file_path'])
+                video_output_path = os.path.join(output_dataset_path, data['video_file_path'])
+                pose_file_output_path = os.path.join(output_dataset_path, data['camera_file_path'])
+                # 传递 device 到 process_one_video
+                well_done = process_one_video(video_file, camera_pose_file, res, video_output_path, pose_file_output_path, depth_anything, genwarp_nvs, output_frames)
+                if well_done:
+                    done_data.append(data)
+            except Exception as e:
+                logging.error(f"Worker {worker_id} encountered an error: {e}")
+                continue
 
         logging.info(f"Worker {worker_id} completed with {len(done_data)} processed items.")
         queue.put(done_data)
@@ -506,7 +515,7 @@ def main(dav2_metric, dav2_outdoor, dav2_model, res, dataset_root_path, json_fil
 
     # all_data = all_data[10001:]
     num_gpus = 4
-    processes_per_gpu = 8
+    processes_per_gpu = 2
     total_processes = num_gpus * processes_per_gpu
     available_gpus = torch.cuda.device_count()
     if available_gpus < num_gpus:
@@ -558,10 +567,10 @@ def main(dav2_metric, dav2_outdoor, dav2_model, res, dataset_root_path, json_fil
 if __name__ == "__main__":
     multiprocessing.set_start_method('spawn')
 
-    dataset_root_path = "/mnt/chenyang_lei/Datasets/easyanimate_dataset/EvaluationSet/RealEstate10KBeforeProcess"
-    json_file_path = "/mnt/chenyang_lei/Datasets/easyanimate_dataset/EvaluationSet/RealEstate10KBeforeProcess/metadata.json"
-    output_dataset_path = "/mnt/chenyang_lei/Datasets/easyanimate_dataset/EvaluationSet/RealEstate10K"
-    output_json_file = "/mnt/chenyang_lei/Datasets/easyanimate_dataset/EvaluationSet/RealEstate10K/metadata.json"
+    dataset_root_path = "/mnt/chenyang_lei/Datasets/easyanimate_dataset"
+    json_file_path = "/mnt/chenyang_lei/Datasets/easyanimate_dataset/realestate_dataset/metadata.json"
+    output_dataset_path = "/mnt/chenyang_lei/Datasets/easyanimate_dataset/z_datasets_warped_videos_2_3"
+    output_json_file = "/mnt/chenyang_lei/Datasets/easyanimate_dataset/z_datasets_warped_videos_2_3/metadata.json"
 
     # Indoor or outdoor model selection for DepthAnythingV2
     dav2_metric = True
