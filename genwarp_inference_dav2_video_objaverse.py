@@ -11,9 +11,6 @@ import torch
 import torchvision
 
 torchvision.disable_beta_transforms_warning()
-import logging
-import multiprocessing
-from multiprocessing import Process, Queue
 import numpy as np
 import torch.nn.functional as F
 from depth_anything_v2.dpt import DepthAnythingV2
@@ -29,13 +26,6 @@ from genwarp.ops import (
     get_projection_matrix,
     sph2cart,
 )
-# 在主进程中设置日志配置
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    filename='logfile.txt',  # 指定日志文件名
-    filemode='a',
-)
 
 
 # Crop the image to the shorter side.
@@ -50,7 +40,7 @@ def crop(img: Image) -> Image:
     return img.crop((left, top, right, bottom))
 
 
-def prepare_models(dav2_outdoor, dav2_model, device):
+def prepare_models(dav2_outdoor, dav2_model):
     dav2_model_configs = {
         'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]},
         'vitb': {'encoder': 'vitb', 'features': 128, 'out_channels': [96, 192, 384, 768]},
@@ -68,11 +58,11 @@ def prepare_models(dav2_outdoor, dav2_model, device):
     # Change the path to the
     dav2_model_fn = f'depth_anything_v2_metric_{"vkitti" if dav2_outdoor else "hypersim"}_{dav2_model}.pth'
     depth_anything.load_state_dict(torch.load(f'./checkpoints_dav2/{dav2_model_fn}', map_location='cpu'))
-    depth_anything = depth_anything.to(device).eval()
+    depth_anything = depth_anything.to('cuda').eval()
 
     # GenWarp
     genwarp_cfg = dict(pretrained_model_path='./checkpoints', checkpoint_name='multi1', half_precision_weights=True)
-    genwarp_nvs = GenWarp(cfg=genwarp_cfg, device=device)
+    genwarp_nvs = GenWarp(cfg=genwarp_cfg)
 
     return depth_anything, genwarp_nvs
 
@@ -273,26 +263,23 @@ def process_one_frame(
     renders = genwarp_nvs(src_image=src_image, src_depth=src_depth, rel_view_mtx=rel_view_mtx, src_proj_mtx=src_proj_mtx, tar_proj_mtx=tar_proj_mtx)
 
     warped = renders['warped']
-    # synthesized = renders['synthesized']
+    synthesized = renders['synthesized']
 
     # To pil image.
     src_pil = to_pil_image(src_image[0])
     tar_pil = to_pil_image(tar_image[0])
     depth_pil = to_pil_image(colorize(src_depth[0].float()))
     warped_pil = to_pil_image(warped[0])
-    synthesized_pil = to_pil_image(warped[0])
-    warped_array = np.array(warped_pil.convert('L'))
-    mask_array = np.where(warped_array == 0, 255, 0).astype(np.uint8)
-    mask_image = Image.fromarray(mask_array, mode='L')
+    synthesized_pil = to_pil_image(synthesized[0])
 
     # Visualise.
-    vis = Image.new('RGB', (res * 3, res * 2))
+    vis = Image.new('RGB', (res * 5, res * 1))
     vis.paste(src_pil, (res * 0, 0))
-    vis.paste(depth_pil, (res * 1, 0))
-    vis.paste(warped_pil, (res * 2, 0))
-    vis.paste(synthesized_pil, (res * 0, res * 1))
-    vis.paste(mask_image, (res * 1, res * 1))
-    vis.paste(tar_pil, (res * 2, res * 1))
+    vis.paste(tar_pil, (res * 1, 0))
+    vis.paste(depth_pil, (res * 2, 0))
+    vis.paste(warped_pil, (res * 3, 0))
+    vis.paste(synthesized_pil, (res * 4, 0))
+
     return vis
 
 
@@ -375,115 +362,31 @@ def process_one_video(video_file, camera_pose_file, res, output_path, depth_anyt
         output_frames.append(vis)
 
     save_output(output_frames, output_path)
-    return True
-def worker(worker_id, gpu_id, dav2_outdoor, dav2_model, res, dataset_root_path, data_subset, output_dataset_path, queue):
-    try:
-        device = f'cuda:{gpu_id}'
-        torch.cuda.set_device(device)
-        logging.info(f"Worker {worker_id} initializing on {device}")
-        # 初始化模型
-        depth_anything, genwarp_nvs = prepare_models(dav2_outdoor, dav2_model, device)
-
-        done_data = []
-        for data in data_subset:
-            try:
-                video_file = os.path.join(dataset_root_path, data['video_file_path'])
-
-                camera_pose_file = os.path.join(dataset_root_path, data['camera_file_path'])
-                output_path = os.path.join(output_dataset_path, data['video_file_path'])
-                # 传递 device 到 process_one_video
-                well_done = process_one_video(video_file, camera_pose_file, res, output_path, depth_anything, genwarp_nvs)
-                if well_done:
-                    done_data.append(data)
-            except Exception as e:
-                logging.error(f"Worker {worker_id} encountered an error: {e}")
-                continue
-
-        logging.info(f"Worker {worker_id} completed with {len(done_data)} processed items.")
-        queue.put(done_data)
-    except Exception as e:
-        import traceback
-        logging.error(f"Worker {worker_id} encountered an error: {e}")
-        logging.error(traceback.format_exc())
-        queue.put([])
 
 
-def main(dav2_outdoor, dav2_model, res, dataset_root_path, json_file_path, output_dataset_path, output_json_file):
+def main(dav2_outdoor, dav2_model, res, dataset_root_path, json_file_path, output_dataset_path):
+    depth_anything, genwarp_nvs = prepare_models(dav2_outdoor, dav2_model)
+
     with open(json_file_path, 'r', encoding='utf-8') as file:
         all_data = json.load(file)
-    # all_data = all_data[10001:]
-    num_gpus = 4
-    processes_per_gpu = 2
-    total_processes = num_gpus * processes_per_gpu
-    available_gpus = torch.cuda.device_count()
-    if available_gpus < num_gpus:
-        raise ValueError(f"需要至少 {num_gpus} 张 GPU，但当前只有 {available_gpus} 张可用。")
-    # 将数据均分为 num_gpus 份
-    data_splits = [[] for _ in range(total_processes)]
-    for idx, data in enumerate(all_data):
-        data_splits[idx % total_processes].append(data)
-    processes = []
-    queue = Queue()
-    for process_id in range(total_processes):
-        gpu_id = process_id % num_gpus
-        p = Process(
-            target=worker,
-            args=(
-                process_id,
-                gpu_id,
-                dav2_outdoor,
-                dav2_model,
-                res,
-                dataset_root_path,
-                data_splits[process_id],
-                output_dataset_path,
-                queue,
-            ),
-        )
-        p.start()
-        processes.append(p)
 
-    # 收集所有 done_data
-    done_data = []
-    for _ in range(total_processes):
-        done_data.extend(queue.get())
-
-    for p in processes:
-        p.join()
-
-    with open(output_json_file, 'w', encoding='utf-8') as file:
-        json.dump(done_data, file, ensure_ascii=False, indent=4)
-
-    logging.info(f"所有数据处理完成，共计处理 {len(done_data)} 个项目。")
-
-    # for data in all_data:
-    #     video_file = os.path.join(dataset_root_path, data['video_file_path'])
-    #     camera_pose_file = os.path.join(dataset_root_path, data['camera_file_path'])
-    #     output_path = os.path.join(output_dataset_path, data['video_file_path'])
-    #     process_one_video(video_file, camera_pose_file, res, output_path, depth_anything, genwarp_nvs)
+    for data in all_data:
+        video_file = os.path.join(dataset_root_path, data['video_file_path'])
+        camera_pose_file = os.path.join(dataset_root_path, data['camera_file_path'])
+        output_path = os.path.join(output_dataset_path, data['video_file_path'])
+        process_one_video(video_file, camera_pose_file, res, output_path, depth_anything, genwarp_nvs)
 
 
 if __name__ == "__main__":
-    multiprocessing.set_start_method('spawn')
-    # dataset_root_path = "/mnt/chenyang_lei/Datasets/easyanimate_dataset"
-    # json_file_path = "/mnt/chenyang_lei/Datasets/easyanimate_dataset/kubric_dataset/metadata.json"
-    # output_dataset_path = "/mnt/chenyang_lei/Datasets/easyanimate_dataset/kubric_dataset/z_mini_datasets_warped_videos"
-    # output_json_file = "/mnt/chenyang_lei/Datasets/easyanimate_dataset/kubric_dataset/warped.json"
-    
-    # dataset_root_path = "/mnt/chenyang_lei/Datasets/easyanimate_dataset"
-    # json_file_path = "/mnt/chenyang_lei/Datasets/easyanimate_dataset/EvaluationSet/Kubric-4D/gcd_validation.json"
-    # output_dataset_path = "/mnt/chenyang_lei/Datasets/easyanimate_dataset/EvaluationSet/Kubric-4D/z_mini_datasets_warped_videos"
-    # output_json_file = "/mnt/chenyang_lei/Datasets/easyanimate_dataset/EvaluationSet/Kubric-4D/warped.json"
-
     dataset_root_path = "/mnt/chenyang_lei/Datasets/easyanimate_dataset"
-    json_file_path = "/mnt/chenyang_lei/Datasets/easyanimate_dataset/objaverse_dataset/metadata_60k.json"
-    output_dataset_path = "/mnt/chenyang_lei/Datasets/easyanimate_dataset/objaverse_dataset/z_mini_datasets_warped_videos"
-    output_json_file = "/mnt/chenyang_lei/Datasets/easyanimate_dataset/objaverse_dataset/warped.json"
+    json_file_path = "/mnt/chenyang_lei/Datasets/easyanimate_dataset/metadata_kubric_15.json"
+    output_dataset_path = "/mnt/chenyang_lei/Datasets/easyanimate_dataset/z_mini_datasets_96_warped_videos"
+
     # Indoor or outdoor model selection for DepthAnythingV2
-    dav2_outdoor = False  # Set True for outdoor, False for indoor
+    dav2_outdoor = True  # Set True for outdoor, False for indoor
     dav2_model = 'vitl'  # ['vits', 'vitb', 'vitl']
 
     # Resolution (the image will be cropped into square).
     res = 512  # in px
 
-    main(dav2_outdoor, dav2_model, res, dataset_root_path, json_file_path, output_dataset_path,output_json_file)
+    main(dav2_outdoor, dav2_model, res, dataset_root_path, json_file_path, output_dataset_path)
