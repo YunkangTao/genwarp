@@ -279,14 +279,14 @@ def process_one_frame(
     renders = genwarp_nvs(src_image=src_image, src_depth=src_depth, rel_view_mtx=rel_view_mtx, src_proj_mtx=src_proj_mtx, tar_proj_mtx=tar_proj_mtx)
 
     warped = renders['warped']
-    synthesized = renders['synthesized']
+    # synthesized = renders['synthesized']
 
     # To pil image.
     src_pil = to_pil_image(src_image[0])
     tar_pil = to_pil_image(tar_image[0])
     depth_pil = to_pil_image(colorize(src_depth[0].float()))
     warped_pil = to_pil_image(warped[0])
-    synthesized_pil = to_pil_image(synthesized[0])
+    synthesized_pil = to_pil_image(warped[0])
 
     warped_array = np.array(warped_pil.convert('L'))
     mask_array = np.where(warped_array == 0, 255, 0).astype(np.uint8)
@@ -416,6 +416,6 @@ if __name__ == "__main__":
     # Resolution (the image will be cropped into square).
     res = 512  # in px
 
-    min_frames = 55
+    output_frames = 49
 
-    main(dav2_metric, dav2_outdoor, dav2_model, res, dataset_root_path, json_file_path, output_dataset_path, output_json_file, min_frames)
+    main(dav2_metric, dav2_outdoor, dav2_model, res, dataset_root_path, json_file_path, output_dataset_path, output_json_file, output_frames)

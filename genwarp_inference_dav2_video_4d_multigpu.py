@@ -29,6 +29,7 @@ from genwarp.ops import (
     get_projection_matrix,
     sph2cart,
 )
+
 # 在主进程中设置日志配置
 logging.basicConfig(
     level=logging.INFO,
@@ -376,6 +377,8 @@ def process_one_video(video_file, camera_pose_file, res, output_path, depth_anyt
 
     save_output(output_frames, output_path)
     return True
+
+
 def worker(worker_id, gpu_id, dav2_outdoor, dav2_model, res, dataset_root_path, data_subset, output_dataset_path, queue):
     try:
         device = f'cuda:{gpu_id}'
@@ -403,6 +406,7 @@ def worker(worker_id, gpu_id, dav2_outdoor, dav2_model, res, dataset_root_path, 
         queue.put(done_data)
     except Exception as e:
         import traceback
+
         logging.error(f"Worker {worker_id} encountered an error: {e}")
         logging.error(traceback.format_exc())
         queue.put([])
@@ -469,7 +473,7 @@ if __name__ == "__main__":
     # json_file_path = "/mnt/chenyang_lei/Datasets/easyanimate_dataset/kubric_dataset/metadata.json"
     # output_dataset_path = "/mnt/chenyang_lei/Datasets/easyanimate_dataset/kubric_dataset/z_mini_datasets_warped_videos"
     # output_json_file = "/mnt/chenyang_lei/Datasets/easyanimate_dataset/kubric_dataset/warped.json"
-    
+
     # dataset_root_path = "/mnt/chenyang_lei/Datasets/easyanimate_dataset"
     # json_file_path = "/mnt/chenyang_lei/Datasets/easyanimate_dataset/EvaluationSet/Kubric-4D/gcd_validation.json"
     # output_dataset_path = "/mnt/chenyang_lei/Datasets/easyanimate_dataset/EvaluationSet/Kubric-4D/z_mini_datasets_warped_videos"
@@ -480,10 +484,10 @@ if __name__ == "__main__":
     output_dataset_path = "/mnt/chenyang_lei/Datasets/easyanimate_dataset/objaverse_dataset/z_mini_datasets_warped_videos"
     output_json_file = "/mnt/chenyang_lei/Datasets/easyanimate_dataset/objaverse_dataset/warped.json"
     # Indoor or outdoor model selection for DepthAnythingV2
-    dav2_outdoor = False  # Set True for outdoor, False for indoor
+    dav2_outdoor = True  # Set True for outdoor, False for indoor
     dav2_model = 'vitl'  # ['vits', 'vitb', 'vitl']
 
     # Resolution (the image will be cropped into square).
     res = 512  # in px
 
-    main(dav2_outdoor, dav2_model, res, dataset_root_path, json_file_path, output_dataset_path,output_json_file)
+    main(dav2_outdoor, dav2_model, res, dataset_root_path, json_file_path, output_dataset_path, output_json_file)

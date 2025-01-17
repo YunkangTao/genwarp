@@ -263,23 +263,26 @@ def process_one_frame(
     renders = genwarp_nvs(src_image=src_image, src_depth=src_depth, rel_view_mtx=rel_view_mtx, src_proj_mtx=src_proj_mtx, tar_proj_mtx=tar_proj_mtx)
 
     warped = renders['warped']
-    synthesized = renders['synthesized']
+    # synthesized = renders['synthesized']
 
     # To pil image.
     src_pil = to_pil_image(src_image[0])
     tar_pil = to_pil_image(tar_image[0])
     depth_pil = to_pil_image(colorize(src_depth[0].float()))
     warped_pil = to_pil_image(warped[0])
-    synthesized_pil = to_pil_image(synthesized[0])
+    synthesized_pil = to_pil_image(warped[0])
+    warped_array = np.array(warped_pil.convert('L'))
+    mask_array = np.where(warped_array == 0, 255, 0).astype(np.uint8)
+    mask_image = Image.fromarray(mask_array, mode='L')
 
     # Visualise.
-    vis = Image.new('RGB', (res * 5, res * 1))
+    vis = Image.new('RGB', (res * 3, res * 2))
     vis.paste(src_pil, (res * 0, 0))
-    vis.paste(tar_pil, (res * 1, 0))
-    vis.paste(depth_pil, (res * 2, 0))
-    vis.paste(warped_pil, (res * 3, 0))
-    vis.paste(synthesized_pil, (res * 4, 0))
-
+    vis.paste(depth_pil, (res * 1, 0))
+    vis.paste(warped_pil, (res * 2, 0))
+    vis.paste(synthesized_pil, (res * 0, res * 1))
+    vis.paste(mask_image, (res * 1, res * 1))
+    vis.paste(tar_pil, (res * 2, res * 1))
     return vis
 
 
